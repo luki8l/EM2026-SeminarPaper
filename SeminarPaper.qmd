@@ -1,0 +1,687 @@
+---
+title: "Signal-based Asset Pricing: Replicating the Change in Analyst Recommendation Factor"
+subtitle: "Empirical Methods 2026 — Seminar Paper"
+author: "Lukas Lobnig"
+date: "2026-03-31"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    theme: cosmo
+    fig-width: 8
+    fig-height: 5
+  pdf:
+    toc: true
+    number-sections: true
+    fig-width: 7
+    fig-height: 4.5
+    geometry: margin=2.5cm
+bibliography: references.bib
+execute:
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This paper replicates and evaluates the **ChangeInRecommendation** signal from Chen and Zimmermann [-@ChenZimmermann2022], which originates from Jegadeesh, Kim, Krische, and Lee [-@JKKL2004]. The signal captures the quarterly change in sell-side analysts' consensus stock recommendation. JKKL show that while the *level* of analyst consensus loses predictive power after controlling for momentum and other characteristics, the *change* in consensus remains a robust cross-sectional return predictor that appears to contain information orthogonal to a large set of quantitative signals.
+
+The economic intuition is straightforward: when analysts collectively revise their recommendations upward (downward), this reflects new private or semi-private information about a firm's prospects that has not yet been fully impounded into prices. Unlike the level of the recommendation --- which JKKL show is heavily contaminated by a "glamour bias" driven by sell-side incentive structures --- changes strip out this persistent bias and isolate the incremental information content of analyst research.
+
+This paper proceeds as follows. Section 2 describes the data. Section 3 constructs the long-short factor portfolio and benchmarks it against Table 2 of Chen and Zimmermann [-@ChenZimmermann2022]. Section 4 tests the factor's pricing power against CAPM, FF3, FF-C4, and FF5. Section 5 evaluates whether augmenting existing models with the new factor improves their ability to price test portfolios. Section 6 examines factor competition. Section 7 presents cross-sectional Fama-MacBeth regressions, and Section 8 concludes.
+
+```{r setup}
+#| label: setup
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RSQLite)
+  library(dbplyr)
+  library(broom)
+  library(lmtest)
+  library(sandwich)
+  library(ggplot2)
+  library(kableExtra)
+  library(GRS.test)
+  library(scales)
+})
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+)
+```
+
+
+# Data
+
+## Database Connection and Signal Identification
+
+We use the `tidy_finance.sqlite` database, which contains CRSP monthly stock data pre-merged with the Chen and Zimmermann [-@ChenZimmermann2022] signal characteristics.
+
+```{r db-connect}
+#| label: db-connect
+
+db_path <- "/home/shared/data/tidy_finance.sqlite"
+tidy_finance <- dbConnect(SQLite(), db_path, extended_types = TRUE)
+```
+
+```{r find-signal}
+#| label: find-signal
+
+# Identify the correct column for ChangeInRecommendation
+all_cols <- tbl(tidy_finance, "crsp_monthly_signal") |> colnames()
+signal_candidates <- grep("change|rec|analyst", all_cols, ignore.case = TRUE, value = TRUE)
+cat("Candidate signal columns:\n")
+print(signal_candidates)
+```
+
+```{r load-data}
+#| label: load-data
+
+# ── ADJUST THIS if the column name differs in your database ──
+SIGNAL_COL <- "change_in_recommendation"
+
+crsp_signal <- tbl(tidy_finance, "crsp_monthly_signal") |>
+  select(
+    permno, gvkey, month, ret_excess, ret, mktcap, mktcap_lag,
+    exchange, all_of(SIGNAL_COL)
+  ) |>
+  collect() |>
+  rename(signal = all_of(SIGNAL_COL)) |>
+  drop_na(signal, ret_excess, mktcap, mktcap_lag) |>
+  filter(mktcap_lag > 0)
+
+# ── Load factor data ──
+# Factor tables use "date"; we rename to "month" for consistency.
+ff3 <- tbl(tidy_finance, "factors_ff3_monthly") |> collect() |> rename(month = date)
+ff5 <- tbl(tidy_finance, "factors_ff5_monthly") |> collect() |> rename(month = date)
+mom <- tbl(tidy_finance, "factors_momentum_monthly") |> collect() |> rename(month = date)
+
+# Merge: FF3 + Momentum → FF-C4; add RMW/CMA from FF5 for FF5 tests.
+# Use explicit select() to avoid duplicate columns (FF3 and FF5 share smb, hml, etc.)
+factors <- ff3 |>
+  select(month, risk_free, mkt_excess, smb, hml) |>
+  inner_join(mom |> select(month, mom), by = "month") |>
+  inner_join(ff5 |> select(month, rmw, cma), by = "month")
+
+cat(
+  "Sample period:", as.character(min(crsp_signal$month)), "to",
+  as.character(max(crsp_signal$month)), "\n",
+  "Stock-month observations:", scales::comma(nrow(crsp_signal)), "\n",
+  "Unique firms:", scales::comma(n_distinct(crsp_signal$permno)), "\n",
+  "Factor months:", nrow(factors)
+)
+```
+
+## Descriptive Statistics
+
+The ChangeInRecommendation signal is discrete and lumpy: many stocks experience no change in consensus recommendations in a given month, producing a large mass at zero. JKKL [-@JKKL2004, Table II Panel B] explicitly handle this by placing all "no change" stocks in the middle quintile, resulting in unequal-sized portfolios. This feature is central to understanding the sorting methodology.
+
+```{r desc-stats}
+#| label: desc-stats
+
+coverage <- crsp_signal |>
+  group_by(month) |>
+  summarise(
+    n_firms = n(),
+    mean_signal = mean(signal),
+    pct_zero = mean(abs(signal) < 1e-8),
+    .groups = "drop"
+  )
+
+ggplot(coverage, aes(x = month, y = n_firms)) +
+  geom_line(color = "steelblue") +
+  labs(title = "Number of Firms with ChangeInRecommendation Signal",
+       x = NULL, y = "Number of firms")
+```
+
+```{r desc-signal}
+#| label: desc-signal
+
+crsp_signal |>
+  summarise(
+    Mean = mean(signal), Median = median(signal), SD = sd(signal),
+    P5 = quantile(signal, 0.05), P25 = quantile(signal, 0.25),
+    P75 = quantile(signal, 0.75), P95 = quantile(signal, 0.95),
+    `Frac = 0` = mean(abs(signal) < 1e-8)
+  ) |>
+  kable(digits = 4, caption = "Cross-sectional summary of the ChangeInRecommendation signal") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+```{r signal-histogram}
+#| label: signal-histogram
+
+crsp_signal |>
+  filter(signal >= quantile(signal, 0.01) & signal <= quantile(signal, 0.99)) |>
+  ggplot(aes(x = signal)) +
+  geom_histogram(bins = 80, fill = "steelblue", alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of ChangeInRecommendation",
+       subtitle = "Trimmed at 1st/99th percentiles; dashed red line at zero",
+       x = "Signal value", y = "Count")
+```
+
+
+# Factor Construction and Replication
+
+## Portfolio Sorting Methodology
+
+The assignment requires us to "create the factor exactly as in the paper" and "use the signal to sort stocks into quantile portfolios (as given)" [@ChenZimmermann2022, Table 2]. JKKL [-@JKKL2004] use **quintile** sorts (5 portfolios), report **equal-weighted** returns, and note that the middle quintile absorbs all "no change" firms, producing unequal-sized portfolios (Table II, Panel B). Chen and Zimmermann follow each original paper's sorting scheme for their Table 2 replication, but standardize the breakpoint computation to use **NYSE-listed stocks only** to prevent small-cap Nasdaq stocks from distorting the cutoffs.
+
+We therefore implement the following:
+
+1. **Primary specification (C&Z Table 2 match)**: Quintile sorts, NYSE breakpoints, equal-weighted returns --- consistent with both JKKL's design and C&Z's standardization.
+2. **Robustness**: Value-weighted returns and decile sorts for comparison.
+
+```{r assign-portfolios}
+#| label: assign-portfolios
+
+# ── Portfolio assignment: NYSE breakpoints, month-by-month ──
+# We iterate over months to handle edge cases cleanly and avoid
+# issues with list columns inside grouped mutate().
+
+assign_portfolios <- function(data, n_groups = 5) {
+  
+  months_vec <- sort(unique(data$month))
+  
+  map_dfr(months_vec, function(m) {
+    
+    d <- data |> filter(month == m)
+    
+    # NYSE breakpoints
+    nyse_signals <- d |> filter(exchange == "NYSE") |> pull(signal)
+    
+    if (length(nyse_signals) < n_groups * 2) return(NULL)
+    
+    # Compute breakpoints at quintile/decile boundaries from NYSE stocks
+    probs <- seq(0, 1, length.out = n_groups + 1)
+    bp <- quantile(nyse_signals, probs = probs, na.rm = TRUE)
+    
+    # Assign ALL stocks using NYSE breakpoints
+    # all.inside = TRUE ensures min → group 1 and max → group n_groups
+    d |> mutate(portfolio = findInterval(signal, bp, all.inside = TRUE))
+  })
+}
+
+# Primary: quintiles (JKKL design)
+crsp_q5 <- assign_portfolios(crsp_signal, n_groups = 5)
+
+# Robustness: deciles
+crsp_d10 <- assign_portfolios(crsp_signal, n_groups = 10)
+```
+
+```{r portfolio-diagnostics}
+#| label: portfolio-diagnostics
+
+# ── Diagnostic: average portfolio sizes ──
+# Due to the lumpy signal, some portfolios may be much larger (especially 
+# the middle quintile which absorbs zero-change stocks).
+crsp_q5 |>
+  group_by(portfolio) |>
+  summarise(
+    `Mean N per month` = n() / n_distinct(month),
+    `Mean signal` = mean(signal),
+    .groups = "drop"
+  ) |>
+  kable(digits = 2, caption = "Quintile portfolio composition (NYSE breakpoints)") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+## Portfolio Returns
+
+JKKL [-@JKKL2004] report **equal-weighted** returns as their primary specification (Tables III, IX). We compute both EW and VW returns, but use EW as the primary specification to match the original paper.
+
+```{r portfolio-returns}
+#| label: portfolio-returns
+
+compute_port_returns <- function(data) {
+  data |>
+    group_by(month, portfolio) |>
+    summarise(
+      ret_ew = mean(ret_excess, na.rm = TRUE),
+      ret_vw = weighted.mean(ret_excess, w = mktcap_lag, na.rm = TRUE),
+      n_stocks = n(),
+      .groups = "drop"
+    )
+}
+
+port_q5  <- compute_port_returns(crsp_q5)
+port_d10 <- compute_port_returns(crsp_d10)
+```
+
+## Long-Short Factor Portfolio
+
+The factor goes **long** the top quintile (stocks with the most positive recommendation changes, i.e. upgrades) and **short** the bottom quintile (most negative changes, i.e. downgrades). A positive mean return indicates upgrades outperform downgrades, consistent with JKKL's finding in Table III Panel C.
+
+```{r long-short}
+#| label: long-short
+
+build_ls <- function(port_data, n_groups, weight_col = "ret_ew") {
+  long  <- port_data |> filter(portfolio == n_groups) |>
+    select(month, ret_long = all_of(weight_col))
+  short <- port_data |> filter(portfolio == 1) |>
+    select(month, ret_short = all_of(weight_col))
+  
+  inner_join(long, short, by = "month") |>
+    mutate(ret_ls = ret_long - ret_short)
+}
+
+# Primary: quintile, EW (matches JKKL & C&Z Table 2)
+ls_q5_ew  <- build_ls(port_q5, 5, "ret_ew")
+# Robustness specifications
+ls_q5_vw  <- build_ls(port_q5, 5, "ret_vw")
+ls_d10_ew <- build_ls(port_d10, 10, "ret_ew")
+ls_d10_vw <- build_ls(port_d10, 10, "ret_vw")
+```
+
+## Replication Results vs. Table 2
+
+We compare the mean monthly return and $t$-statistic to the benchmark in Table 2 of Chen and Zimmermann [-@ChenZimmermann2022].
+
+```{r table2-replication}
+#| label: table2-replication
+
+ls_summary <- function(ls_data, label) {
+  r <- ls_data$ret_ls
+  n <- length(r)
+  tibble(
+    Specification = label,
+    `Mean (% p.m.)` = mean(r) * 100,
+    `t-stat` = mean(r) / (sd(r) / sqrt(n)),
+    `SD (% p.m.)` = sd(r) * 100,
+    `Sharpe (ann.)` = mean(r) / sd(r) * sqrt(12),
+    `N months` = n
+  )
+}
+
+bind_rows(
+  ls_summary(ls_q5_ew,  "Quintile EW (primary — JKKL style)"),
+  ls_summary(ls_q5_vw,  "Quintile VW"),
+  ls_summary(ls_d10_ew, "Decile EW"),
+  ls_summary(ls_d10_vw, "Decile VW")
+) |>
+  kable(digits = 3, caption = "Long-short portfolio: replication summary") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+```{r monotonicity-table}
+#| label: monotonicity-table
+
+port_q5 |>
+  group_by(portfolio) |>
+  summarise(
+    `Mean EW (% p.m.)` = mean(ret_ew) * 100,
+    `t (EW)` = mean(ret_ew) / (sd(ret_ew) / sqrt(n())),
+    `Mean VW (% p.m.)` = mean(ret_vw) * 100,
+    `t (VW)` = mean(ret_vw) / (sd(ret_vw) / sqrt(n())),
+    `Mean N` = mean(n_stocks),
+    .groups = "drop"
+  ) |>
+  kable(digits = 3,
+        caption = "Quintile portfolio returns (1 = downgrades, 5 = upgrades)") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+```{r monotonicity-plot}
+#| label: monotonicity-plot
+
+port_q5 |>
+  group_by(portfolio) |>
+  summarise(mean_ret = mean(ret_ew) * 100, .groups = "drop") |>
+  ggplot(aes(x = factor(portfolio), y = mean_ret)) +
+  geom_col(fill = "steelblue", alpha = 0.85) +
+  labs(title = "Mean Monthly Excess Returns by Signal Quintile",
+       subtitle = "Equal-weighted, NYSE breakpoints (primary specification)",
+       x = "Quintile (1 = Downgrade, 5 = Upgrade)",
+       y = "Mean excess return (% p.m.)")
+```
+
+### Discussion of Replication Quality
+
+Any deviation from C&Z's Table 2 may stem from several sources. First, the `tidy_finance` database may cover a slightly different sample window than C&Z's full WRDS extract. Second, C&Z typically winsorize signals at the 1st/99th percentiles before sorting; the pre-computed signal in the database may apply different or no winsorization. Third, the discrete nature of recommendation changes means that small differences in breakpoint computation --- such as how tied values at zero are allocated --- can shift the composition of extreme portfolios. Fourth, post-publication decay [@McLeanPontiff2016] may weaken the anomaly in the later portion of the sample.
+
+
+# Pricing Tests
+
+We evaluate whether the long-short factor earns a statistically significant alpha after adjusting for exposure to established risk factors. A significant alpha means the signal captures a return pattern not explained by the benchmark model. We use Newey-West [-@NeweyWest1987] standard errors with 6 lags.
+
+```{r pricing-tests}
+#| label: pricing-tests
+
+# Merge primary L/S factor with pricing factors
+factor_data <- ls_q5_ew |>
+  inner_join(factors, by = "month") |>
+  drop_na()
+
+run_alpha_test <- function(data, formula_str, model_name) {
+  fit <- lm(as.formula(formula_str), data = data)
+  ct <- coeftest(fit, vcov = NeweyWest(fit, lag = 6))
+  tibble(
+    Model = model_name,
+    `Alpha (% p.m.)` = ct["(Intercept)", "Estimate"] * 100,
+    `t-stat (NW)` = ct["(Intercept)", "t value"],
+    `R²` = summary(fit)$r.squared
+  )
+}
+
+bind_rows(
+  run_alpha_test(factor_data, "ret_ls ~ mkt_excess", "CAPM"),
+  run_alpha_test(factor_data, "ret_ls ~ mkt_excess + smb + hml", "FF3"),
+  run_alpha_test(factor_data, "ret_ls ~ mkt_excess + smb + hml + mom", "FF-C4"),
+  run_alpha_test(factor_data, "ret_ls ~ mkt_excess + smb + hml + rmw + cma", "FF5")
+) |>
+  kable(digits = 3,
+        caption = "Alpha of the ChangeInRecommendation factor (NW lag=6)") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+```{r full-c4-regression}
+#| label: full-c4-regression
+
+# Full FF-C4 regression — the key benchmark given JKKL's focus on momentum
+fit_c4 <- lm(ret_ls ~ mkt_excess + smb + hml + mom, data = factor_data)
+ct_c4 <- coeftest(fit_c4, vcov = NeweyWest(fit_c4, lag = 6))
+
+tidy(ct_c4) |>
+  mutate(
+    term = recode(term, "(Intercept)" = "Alpha"),
+    estimate = ifelse(term == "Alpha", estimate * 100, estimate)
+  ) |>
+  rename(Coefficient = term, Estimate = estimate,
+         `SE (NW)` = std.error, `t` = statistic, `p` = p.value) |>
+  kable(digits = 4, caption = "FF-C4 regression (alpha in % p.m.)") |>
+  kable_styling(bootstrap_options = "striped")
+
+cat("R²:", round(summary(fit_c4)$r.squared, 4))
+```
+
+The FF-C4 test is the most important benchmark. JKKL [-@JKKL2004, Table VIII Panel B] show that CHGCON remains significant even after controlling for momentum, contrarian scores, and all 12 individual quantitative signals. If our alpha survives the Carhart model --- which includes the UMD momentum factor --- this corroborates JKKL's core finding that recommendation changes convey genuinely new information beyond mechanical price signals.
+
+
+# Factor Augmentation
+
+## GRS Test on Industry Portfolios
+
+We test whether adding the ChangeInRecommendation factor improves the FF-C4 model's ability to jointly price 30 industry portfolios, using the Gibbons-Ross-Shanken [-@GibbonsRossShanken1989] test.
+
+```{r grs-test}
+#| label: grs-test
+# 1. Pull the data (already in wide format)
+industries_30 <- tbl(tidy_finance, "industries_30_ff_monthly") |> collect()
+
+# 2. Skip pivot_wider, just rename 'date' to 'month' to match your factors data, and drop NAs
+ind_wide <- industries_30 |>
+  rename(month = date) |> 
+  drop_na()
+
+# 3. Define your industry columns (everything except the 'month' column)
+ind_cols <- setdiff(colnames(ind_wide), "month")
+
+# 4. Pull your custom factor
+chgrec_factor <- ls_q5_ew |> select(month, chgrec = ret_ls)
+
+# 5. Join everything together
+test_data <- ind_wide |>
+  inner_join(factors, by = "month") |>
+  inner_join(chgrec_factor, by = "month") |>
+  drop_na()
+
+# 6. Set up the matrices for the GRS test
+Y  <- test_data |> select(all_of(ind_cols)) |> as.matrix()
+X1 <- test_data |> select(mkt_excess, smb, hml, mom) |> as.matrix()
+X2 <- test_data |> select(mkt_excess, smb, hml, mom, chgrec) |> as.matrix()
+
+# 7. Run the tests
+grs1 <- GRS.test(Y, X1)
+grs2 <- GRS.test(Y, X2)
+
+# 8. Output the results
+tibble(
+  Model = c("FF-C4", "FF-C4 + ChgRec"),
+  `GRS stat` = c(grs1$GRS.stat, grs2$GRS.stat),
+  `p-value` = c(grs1$GRS.pval, grs2$GRS.pval)
+) |>
+  kable(digits = 4, caption = "GRS test on 30 industry portfolios") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+## Individual Alpha Comparison
+
+```{r spanning-alphas}
+#| label: spanning-alphas
+
+compute_alphas <- function(test_data, ind_cols, rhs) {
+  map_dfr(ind_cols, function(col) {
+    df <- test_data |> rename(y = all_of(col))
+    fit <- lm(as.formula(paste("y ~", rhs)), data = df)
+    ct <- coeftest(fit, vcov = NeweyWest(fit, lag = 6))
+    tibble(portfolio = col,
+           alpha = ct["(Intercept)", "Estimate"] * 100,
+           t_stat = ct["(Intercept)", "t value"])
+  })
+}
+
+a1 <- compute_alphas(test_data, ind_cols, "mkt_excess + smb + hml + mom") |>
+  rename(alpha_c4 = alpha, t_c4 = t_stat)
+a2 <- compute_alphas(test_data, ind_cols, "mkt_excess + smb + hml + mom + chgrec") |>
+  rename(alpha_aug = alpha, t_aug = t_stat)
+
+left_join(a1, a2, by = "portfolio") |>
+  mutate(reduction = abs(alpha_c4) - abs(alpha_aug)) |>
+  summarise(
+    `Mean |α| FF-C4 (%)` = mean(abs(alpha_c4)),
+    `Mean |α| Augmented (%)` = mean(abs(alpha_aug)),
+    `Mean reduction (pp)` = mean(reduction),
+    `# improved` = sum(reduction > 0),
+    `Total` = n()
+  ) |>
+  kable(digits = 3, caption = "Alpha reductions from augmentation") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+
+# Factor Competition
+
+```{r spanning-test}
+#| label: spanning-test
+
+# ChgRec regressed on FF-C4 factors → is the new factor spanned?
+fit_span <- lm(chgrec ~ mkt_excess + smb + hml + mom, data = test_data)
+ct_span <- coeftest(fit_span, vcov = NeweyWest(fit_span, lag = 6))
+
+tidy(ct_span) |>
+  mutate(estimate = ifelse(term == "(Intercept)", estimate * 100, estimate)) |>
+  kable(digits = 4,
+        caption = "Spanning: ChgRec on FF-C4 (intercept in % p.m.)") |>
+  kable_styling(bootstrap_options = "striped")
+
+cat("R²:", round(summary(fit_span)$r.squared, 4))
+```
+
+```{r reverse-regressions}
+#| label: reverse-regressions
+
+map_dfr(c("mkt_excess", "smb", "hml", "mom"), function(fac) {
+  df <- test_data |> rename(y = all_of(fac))
+  fit <- lm(y ~ chgrec, data = df)
+  ct <- coeftest(fit, vcov = NeweyWest(fit, lag = 6))
+  tibble(`Dep. Var` = fac,
+         `α (% p.m.)` = ct[1,1]*100, `t(α)` = ct[1,3],
+         `β(ChgRec)` = ct[2,1], `t(β)` = ct[2,3],
+         `R²` = summary(fit)$r.squared)
+}) |>
+  kable(digits = 4, caption = "Reverse: each FF-C4 factor on ChgRec") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+```{r correlation-matrix}
+#| label: correlation-matrix
+
+test_data |>
+  select(mkt_excess, smb, hml, mom, chgrec) |>
+  cor() |> round(3) |>
+  kable(caption = "Factor correlation matrix") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+A low $R^2$ combined with a significant intercept is the clearest evidence the factor is not redundant. This aligns with JKKL's finding that recommendation changes carry information "orthogonal to a large range of other predictive variables" [-@JKKL2004].
+
+
+# Comparison to Table 2 and Literature
+
+```{r cumulative-returns}
+#| label: cumulative-returns
+
+ls_q5_ew |>
+  arrange(month) |>
+  mutate(cum_ret = cumprod(1 + ret_ls) - 1) |>
+  ggplot(aes(x = month, y = cum_ret)) +
+  geom_line(color = "steelblue", linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Cumulative Returns: ChangeInRecommendation Long-Short Factor",
+       subtitle = "Quintile 5 – Quintile 1, equal-weighted",
+       x = NULL, y = "Cumulative excess return")
+```
+
+Potential sources of deviation from C&Z Table 2:
+
+- **Sample period**: The `tidy_finance` database may cover a different window than C&Z's full extract.
+- **Signal construction**: C&Z compute the signal from raw IBES using their own code. Differences in how the recommendation change is computed (lag structure, analyst filtering) affect outcomes.
+- **Breakpoint sensitivity**: With a lumpy signal, small differences in how tied values at zero are handled shift the extreme portfolio boundaries.
+- **Post-publication decay**: JKKL published in 2004. McLean and Pontiff [-@McLeanPontiff2016] document that anomalies weaken by ~58% post-publication on average.
+
+
+# Cross-Sectional Pricing (Voluntary)
+
+## Fama-MacBeth Regressions
+
+Following Fama and MacBeth [-@FamaMacBeth1973], we run monthly cross-sectional regressions of next-month excess returns on the signal. We use Newey-West standard errors with 3 lags and signal *characteristics* (not factor betas) as the regressor, consistent with the assignment instructions and with JKKL's approach.
+
+```{r fama-macbeth}
+#| label: fama-macbeth
+
+fm_data <- crsp_signal |>
+  arrange(permno, month) |>
+  group_by(permno) |>
+  mutate(ret_lead = lead(ret_excess)) |>
+  ungroup() |>
+  drop_na(ret_lead, signal)
+
+fm_coefs <- fm_data |>
+  group_by(month) |>
+  do(tidy(lm(ret_lead ~ signal, data = .))) |>
+  ungroup()
+
+gamma1_ts <- fm_coefs |> filter(term == "signal")
+
+fm_stat <- function(x, lag = 3) {
+  mu <- mean(x)
+  se <- sqrt(sandwich::lrvar(x, type = "Newey-West", lag = lag))
+  c(mean = mu, se = se, t = mu / se)
+}
+
+g1 <- fm_stat(gamma1_ts$estimate)
+
+tibble(
+  `γ₁ (% p.m.)` = g1["mean"] * 100,
+  `NW SE (%)` = g1["se"] * 100,
+  `t-stat (NW, lag=3)` = g1["t"],
+  `N months` = nrow(gamma1_ts)
+) |>
+  kable(digits = 3, caption = "Fama-MacBeth: univariate signal premium") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+## Extended Regression with Size Control
+
+```{r fm-with-size}
+#| label: fm-with-size
+
+fm_data_ext <- fm_data |>
+  mutate(log_size = log(mktcap_lag)) |> drop_na(log_size)
+
+fm_coefs_ext <- fm_data_ext |>
+  group_by(month) |>
+  do(tidy(lm(ret_lead ~ signal + log_size, data = .))) |>
+  ungroup()
+
+g1x <- fm_stat(fm_coefs_ext |> filter(term == "signal") |> pull(estimate))
+gs  <- fm_stat(fm_coefs_ext |> filter(term == "log_size") |> pull(estimate))
+
+tibble(
+  Variable = c("Signal (γ₁)", "Log size"),
+  `Mean (% p.m.)` = c(g1x["mean"], gs["mean"]) * 100,
+  `NW t-stat` = c(g1x["t"], gs["t"])
+) |>
+  kable(digits = 3, caption = "Fama-MacBeth with size control") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+## Dynamics of the Premium
+
+```{r gamma-dynamics}
+#| label: gamma-dynamics
+
+gamma1_ts |>
+  mutate(
+    gamma_pct = estimate * 100,
+    gamma_roll = zoo::rollmean(gamma_pct, k = 36, fill = NA, align = "right")
+  ) |>
+  ggplot(aes(x = month)) +
+  geom_line(aes(y = gamma_pct), alpha = 0.2, color = "grey50") +
+  geom_line(aes(y = gamma_roll), color = "steelblue", linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2004-06-01"), linetype = "dotted", color = "red") +
+  annotate("text", x = as.Date("2005-06-01"),
+           y = max(gamma1_ts$estimate * 80, na.rm = TRUE),
+           label = "JKKL publication", hjust = 0, color = "red", size = 3) +
+  labs(title = "Time-Varying Signal Premium (γ₁)",
+       subtitle = "Monthly (grey) and 36-month rolling mean (blue)",
+       x = NULL, y = expression(hat(gamma)[1] ~ "(% p.m.)"))
+```
+
+```{r subsample}
+#| label: subsample
+
+gamma1_ts |>
+  mutate(period = ifelse(month <= as.Date("2004-06-01"),
+                         "Pre-publication (≤2004)", "Post-publication (>2004)")) |>
+  group_by(period) |>
+  summarise(
+    `Mean γ₁ (% p.m.)` = mean(estimate) * 100,
+    `SD (%)` = sd(estimate) * 100,
+    `t-stat` = mean(estimate) / (sd(estimate) / sqrt(n())),
+    `N months` = n(), .groups = "drop"
+  ) |>
+  kable(digits = 3, caption = "Signal premium: pre- vs. post-publication") |>
+  kable_styling(bootstrap_options = "striped")
+```
+
+
+# Conclusion
+
+This paper replicates the ChangeInRecommendation factor from Chen and Zimmermann [-@ChenZimmermann2022], based on the quarterly change in consensus analyst recommendations studied by JKKL [-@JKKL2004].
+
+[Fill in based on your results: Report the mean return and t-stat vs. Table 2. Discuss whether the FF-C4 alpha is significant. Report factor competition R² and correlation with MOM. Note GRS improvement. Comment on Fama-MacBeth premium dynamics and post-publication decay.]
+
+From a broader perspective, JKKL's distinction between the *level* and the *change* in consensus recommendations is a powerful methodological insight. The level absorbs sell-side incentive biases --- the preference for glamour stocks --- that erode its predictive content, while the change strips out this persistent component and isolates incremental news. This mirrors the logic of momentum as a change in prices, earnings surprises as changes in expectations, and forecast revisions as changes in beliefs. The general lesson is that for any signal shaped by persistent institutional biases, its first difference may be more informative than its level.
+
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+```{r cleanup}
+#| label: cleanup
+#| include: false
+dbDisconnect(tidy_finance)
+```
