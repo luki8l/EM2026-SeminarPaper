@@ -83,7 +83,7 @@ print(signal_candidates)
 ```{r load-data}
 #| label: load-data
 
-# ── ADJUST THIS if the column name differs in your database ──
+# -- ADJUST THIS if the column name differs in your database --
 SIGNAL_COL <- "change_in_recommendation"
 
 crsp_signal <- tbl(tidy_finance, "crsp_monthly_signal") |>
@@ -106,7 +106,7 @@ crsp_signal <- tbl(tidy_finance, "crsp_monthly_signal") |>
   drop_na(signal, ret_excess, mktcap, mktcap_lag) |>
   filter(mktcap_lag > 0)
 
-# ── Load factor data ──
+# -- Load factor data --
 # Factor tables use "date"; we rename to "month" for consistency.
 ff3 <- tbl(tidy_finance, "factors_ff3_monthly") |> collect() |> rename(month = date)
 ff5 <- tbl(tidy_finance, "factors_ff5_monthly") |> collect() |> rename(month = date)
@@ -220,7 +220,7 @@ We therefore implement the following:
 ```{r assign-portfolios}
 #| label: assign-portfolios
 
-# ── Function: assign each stock to a portfolio (1 to n_groups) every month ──
+# -- Function: assign each stock to a portfolio (1 to n_groups) every month --
 # We loop month-by-month instead of using grouped mutate()
 assign_portfolios <- function(data, n_groups = 5) {
   
@@ -235,7 +235,7 @@ assign_portfolios <- function(data, n_groups = 5) {
     # Subset to one month's cross-section
     d <- data |> filter(month == m)
     
-    # ── NYSE breakpoints ──
+    # - NYSE breakpoints --
     # Extract signal values ONLY from NYSE-listed stocks.
     # Why? NASDAQ has many more small-cap stocks than NYSE. If we used
     # all exchanges, small illiquid stocks would dominate the breakpoints,
@@ -255,7 +255,7 @@ assign_portfolios <- function(data, n_groups = 5) {
     probs <- seq(0, 1, length.out = n_groups + 1)
     bp <- quantile(nyse_signals, probs = probs, na.rm = TRUE)
     
-    # ── Assign ALL stocks (NYSE + NASDAQ + AMEX) to portfolios ──
+    # -- Assign ALL stocks (NYSE + NASDAQ + AMEX) to portfolios --
     # findInterval(x, bp) returns which bin x falls into.
     # Example: if bp = [−3, −1, 0, 0.5, 1, 4] and signal = 0.7,
     # it falls between bp[4]=0.5 and bp[5]=1, so portfolio = 4.
@@ -268,7 +268,7 @@ assign_portfolios <- function(data, n_groups = 5) {
   })
 }
 
-# ── Apply the function ──
+# -- Apply the function --
 
 # Primary specification: 5 portfolios (quintiles)
 # This matches JKKL (2004), who use quintile sorts throughout
@@ -285,7 +285,7 @@ crsp_d10 <- assign_portfolios(crsp_signal, n_groups = 10)
 ```{r portfolio-diagnostics}
 #| label: portfolio-diagnostics
 
-# ── Diagnostic: check whether portfolio sizes are reasonable ──
+# -- Diagnostic: check whether portfolio sizes are reasonable --
 # With a lumpy signal like ChangeInRecommendation (many zeros),
 # we expect unequal portfolio sizes. JKKL (2004, Table II Panel B)
 # report ~294 stocks in the middle quintile vs ~145–198 in others.
@@ -332,7 +332,7 @@ JKKL [-@JKKL2004] report **equal-weighted** returns as their primary specificati
 ```{r portfolio-returns}
 #| label: portfolio-returns
 
-# ── Function: compute monthly portfolio returns (both EW and VW) ──
+# -- Function: compute monthly portfolio returns (both EW and VW) --
 # For each month × portfolio combination, we aggregate individual
 # stock returns into a single portfolio return.
 compute_port_returns <- function(data) {
@@ -379,7 +379,7 @@ The factor goes **long** the top quintile (stocks with the most positive recomme
 ```{r long-short}
 #| label: long-short
 
-# ── Function: construct the long-short factor return each month ──
+# -- Function: construct the long-short factor return each month --
 # The idea: buy the "best" portfolio (highest signal = upgrades),
 # sell the "worst" portfolio (lowest signal = downgrades),
 # and earn the return difference. This is the core of any
@@ -408,7 +408,7 @@ build_ls <- function(port_data, n_groups, weight_col = "ret_ew") {
     mutate(ret_ls = ret_long - ret_short)
 }
 
-# ── Apply to all four specifications ──
+# -- Apply to all four specifications --
 # PRIMARY: quintile sort, equal-weighted
 # This is the specification that should match JKKL (2004) and C&Z Table 2.
 ls_q5_ew  <- build_ls(port_q5, 5, "ret_ew")
@@ -434,7 +434,7 @@ We compare the mean monthly return and $t$-statistic to the benchmark in Table 2
 ```{r table2-replication}
 #| label: table2-replication
 
-# ── Function: compute summary statistics for a long-short factor ──
+# -- Function: compute summary statistics for a long-short factor --
 # Takes one L/S return series and produces a one-row summary tibble.
 ls_summary <- function(ls_data, label) {
   
@@ -474,7 +474,7 @@ ls_summary <- function(ls_data, label) {
   )
 }
 
-# ── Build a comparison table across all four specifications ──
+# -- Build a comparison table across all four specifications --
 # bind_rows() stacks the one-row tibbles vertically into a 4-row table.
 bind_rows(
   ls_summary(ls_q5_ew,  "Quintile EW (primary — JKKL style)"),
@@ -492,7 +492,7 @@ However, switching to value-weighted returns causes the premium to collapse: Qui
 ```{r monotonicity-table}
 #| label: monotonicity-table
 
-# ── Monotonicity table: show returns for EACH quintile separately ──
+# -- Monotonicity table: show returns for EACH quintile separately --
 # This is the full portfolio sort table — the most important diagnostic.
 # If the signal truly predicts returns, we should see a monotonic increase
 # from portfolio 1 (downgrades) to portfolio 5 (upgrades).
@@ -536,7 +536,7 @@ Under VW, the pattern improves somewhat in terms of monotonicity — the return 
 ```{r monotonicity-plot}
 #| label: monotonicity-plot
 
-# ── Bar chart: visualize the monotonicity pattern ──
+# -- Bar chart: visualize the monotonicity pattern --
 # This is the graphical companion to the monotonicity table above.
 # A clean staircase pattern from left to right = strong signal.
 port_q5 |>
@@ -591,7 +591,7 @@ We evaluate whether the long-short factor earns a statistically significant alph
 ```{r pricing-tests}
 #| label: pricing-tests
 
-# ── Pricing Tests: does the L/S factor earn alpha after risk adjustment? ──
+# -- Pricing Tests: does the L/S factor earn alpha after risk adjustment? --
 # Merge the primary long-short return series (Quintile EW) with
 # the factor data (MKT, SMB, HML, MOM, RMW, CMA).
 # inner_join: keeps only months present in BOTH datasets.
@@ -600,7 +600,7 @@ factor_data <- ls_q5_ew |>
   inner_join(factors, by = "month") |>
   drop_na()
 
-# ── Helper function: run a time-series regression, extract alpha ──
+# -- Helper function: run a time-series regression, extract alpha --
 # This performs the standard asset pricing test:
 # ret_ls_t = alpha + beta_1 * F1_t + beta_2 * F2_t + ... + epsilon_t
 # If alpha is significantly different from zero, the factor earns
@@ -634,7 +634,7 @@ run_alpha_test <- function(data, formula_str, model_name) {
   )
 }
 
-# ── Run four nested models, each adding more factors ──
+# -- Run four nested models, each adding more factors --
 bind_rows(
   
   # CAPM: ret_ls = alpha + beta * MKT + eps
@@ -675,7 +675,7 @@ The R² values are strikingly low across all models (0.2%–5.2%), meaning the e
 ```{r full-c4-regression}
 #| label: full-c4-regression
 
-# ── Full FF-C4 regression:
+# -- Full FF-C4 regression:
 # The previous table only reported the intercept (alpha) from each model.
 # Here we display the complete regression output for FF-C4 specifically,
 # because this is the key model for this signal.
@@ -702,7 +702,7 @@ tidy(ct_c4) |>
   ) |>
   rename(Coefficient = term, Estimate = estimate,
          `SE (NW)` = std.error, `t` = statistic, `p` = p.value) |>
-  kable(digits = 4, caption = "FF-C4 regression (alpha in % p.m.)") |>
+  kable(digits = 4, caption = "FF-C4 regression (alpha in \\% p.m.)") |>
   kable_styling(bootstrap_options = "striped")
 
 # Print R² separately
@@ -730,8 +730,8 @@ We test whether adding the ChangeInRecommendation factor improves the FF-C4 mode
 ```{r grs-test}
 #| label: grs-test
 #| 
-# ── GRS Test: does adding ChgRec improve the model's ability to price ──
-# ── a set of test portfolios?                                         ──
+# -- GRS Test: does adding ChgRec improve the model's ability to price --
+# -- a set of test portfolios?                                         --
 #
 # The Gibbons-Ross-Shanken (1989) test jointly tests whether ALL intercepts
 # (alphas) from regressing N test portfolios on a factor model are zero.
@@ -742,12 +742,12 @@ We test whether adding the ChangeInRecommendation factor improves the FF-C4 mode
 # has a lower GRS statistic (higher p-value), the new factor helps
 # explain returns that the base model could not.
 
-# ── 1. Load the 30 Fama-French industry portfolios as test assets ──
+# -- 1. Load the 30 Fama-French industry portfolios as test assets --
 # These are standard test portfolios used throughout the asset pricing
 # literature. Each column is one industry's monthly excess return.
 industries_30 <- tbl(tidy_finance, "industries_30_ff_monthly") |> collect()
 
-# ── 2. Rename date → month for consistency, drop incomplete rows ──
+# -- 2. Rename date → month for consistency, drop incomplete rows --
 # The industry table uses "date" while our factor data uses "month".
 # drop_na() removes any month where one or more industries have
 # missing returns
@@ -755,16 +755,16 @@ ind_wide <- industries_30 |>
   rename(month = date) |> 
   drop_na()
 
-# ── 3. Identify the industry column names ──
+# -- 3. Identify the industry column names --
 # Everything except "month" is an industry return column.
 # These will become the N dependent variables (left-hand side) in the GRS test.
 ind_cols <- setdiff(colnames(ind_wide), "month")
 
-# ── 4. Prepare our custom factor as a one-column tibble ──
+# -- 4. Prepare our custom factor as a one-column tibble --
 # Rename ret_ls → chgrec so it has a clean name when merged.
 chgrec_factor <- ls_q5_ew |> select(month, chgrec = ret_ls)
 
-# ── 5. Merge everything into one dataset ──
+# -- 5. Merge everything into one dataset --
 # inner_join: only months where industry data, factor data, AND
 # our custom factor all exist. This ensures the Y and X matrices
 # have the same number of rows (same time period).
@@ -773,7 +773,7 @@ test_data <- ind_wide |>
   inner_join(chgrec_factor, by = "month") |>
   drop_na()
 
-# ── 6. Set up matrices for the GRS test ──
+# -- 6. Set up matrices for the GRS test --
 # GRS.test() requires:
 #   Y: T × N matrix of test asset returns (30 industries × T months)
 #   X: T × K matrix of factor returns (K = 4 or 5 factors)
@@ -783,7 +783,7 @@ Y  <- test_data |> select(all_of(ind_cols)) |> as.matrix() # 30 industry returns
 X1 <- test_data |> select(mkt_excess, smb, hml, mom) |> as.matrix() # FF-C4 (4 factors)
 X2 <- test_data |> select(mkt_excess, smb, hml, mom, chgrec) |> as.matrix() # FF-C4 + ChgRec (5 factors)
 
-# ── 7. Run both GRS tests ──
+# -- 7. Run both GRS tests --
 # grs1: baseline model (FF-C4 alone)
 # grs2: augmented model (FF-C4 + our factor)
 # If grs2$GRS.stat < grs1$GRS.stat, augmentation helps.
@@ -792,7 +792,7 @@ X2 <- test_data |> select(mkt_excess, smb, hml, mom, chgrec) |> as.matrix() # FF
 grs1 <- GRS.test(Y, X1)
 grs2 <- GRS.test(Y, X2)
 
-# ── 8. Present results ──
+# -- 8. Present results --
 tibble(
   Model = c("FF-C4", "FF-C4 + ChgRec"),
   `GRS stat` = c(grs1$GRS.stat, grs2$GRS.stat),
@@ -811,12 +811,12 @@ This is a noteworthy result given that the ChangeInRecommendation factor is cons
 ```{r spanning-alphas}
 #| label: spanning-alphas
 
-# ── Individual alpha comparison: which industries benefit from augmentation? ──
+# -- Individual alpha comparison: which industries benefit from augmentation? --
 # The GRS test tells us the JOINT picture. Here we look portfolio-by-portfolio:
 # for each of the 30 industries, does adding ChgRec shrink the alpha?
 
-# ── Helper function: regress each test portfolio on a factor model, ──
-# ── extract its alpha (intercept) with Newey-West standard errors.  ──
+# -- Helper function: regress each test portfolio on a factor model, --
+# -- extract its alpha (intercept) with Newey-West standard errors.  --
 compute_alphas <- function(test_data, ind_cols, rhs) {
   
   # Loop over each industry column. For each one:
@@ -834,7 +834,7 @@ compute_alphas <- function(test_data, ind_cols, rhs) {
   })
 }
 
-# ── Run for both models ──
+# -- Run for both models --
 
 # Baseline: FF-C4 alphas for each of the 30 industries
 a1 <- compute_alphas(test_data, ind_cols, "mkt_excess + smb + hml + mom") |>
@@ -844,7 +844,7 @@ a1 <- compute_alphas(test_data, ind_cols, "mkt_excess + smb + hml + mom") |>
 a2 <- compute_alphas(test_data, ind_cols, "mkt_excess + smb + hml + mom + chgrec") |>
   rename(alpha_aug = alpha, t_aug = t_stat)
 
-# ── Compare: does augmentation shrink absolute alphas? ─
+# -- Compare: does augmentation shrink absolute alphas? -
 left_join(a1, a2, by = "portfolio") |>
   
   # For each industry, compute how much the |alpha| decreased.
@@ -886,7 +886,7 @@ This outcome is not surprising for the ChangeInRecommendation signal. Analyst co
 ```{r spanning-test}
 #| label: spanning-test
 
-# ── Spanning test: can the FF-C4 factors replicate our factor? ──
+# -- Spanning test: can the FF-C4 factors replicate our factor? --
 # This is the REVERSE of the pricing test in Section 4.
 # There, we asked: "does ChgRec earn alpha after controlling for FF-C4?"
 # Here, we ask the same question from the factor model's perspective:
@@ -911,9 +911,12 @@ ct_span <- coeftest(fit_span, vcov = NeweyWest(fit_span, lag = 6))
 tidy(ct_span) |>
   # Convert only the intercept (alpha) to percent;
   # the betas are unitless and stay as-is.
-  mutate(estimate = ifelse(term == "(Intercept)", estimate * 100, estimate)) |>
+  mutate(
+    estimate = ifelse(term == "(Intercept)", estimate * 100, estimate),
+    term = recode(term, "(Intercept)" = "Alpha")
+  ) |>
   kable(digits = 4,
-        caption = "Spanning: ChgRec on FF-C4 (intercept in % p.m.)") |>
+        caption = "Spanning: ChgRec on FF-C4 (intercept in \\% p.m.)") |>
   kable_styling(bootstrap_options = "striped")
 
 # Print R² — the key diagnostic for spanning.
@@ -931,7 +934,7 @@ The 5.2% R² is strong evidence that the ChangeInRecommendation factor would be 
 ```{r reverse-regressions}
 #| label: reverse-regressions
 
-# ── Reverse spanning: does ChgRec subsume any of the existing factors? ──
+# -- Reverse spanning: does ChgRec subsume any of the existing factors? --
 # The previous test asked: "can FF-C4 replicate ChgRec?" (answer: no).
 # Now we flip the question for each factor individually:
 # "does MKT / SMB / HML / MOM still earn alpha after controlling for ChgRec?"
@@ -980,7 +983,7 @@ The overall picture from both directions of the factor competition is clean: the
 ```{r correlation-matrix}
 #| label: correlation-matrix
 
-# ── Factor correlation matrix: the simplest independence check ──
+# -- Factor correlation matrix: the simplest independence check --
 # Correlations complement the regression-based spanning tests above.
 # While regressions capture MULTIVARIATE relationships (e.g., ChgRec
 # could be uncorrelated with MOM individually but correlated with a
@@ -1017,7 +1020,7 @@ For context, the correlations among the existing Carhart factors are often large
 ```{r cumulative-returns}
 #| label: cumulative-returns
 
-# ── Cumulative return plot: visualize the factor's performance over time ──
+# -- Cumulative return plot: visualize the factor's performance over time --
 # This is the "equity curve" of the long-short strategy — if you had
 # invested $1 in the factor at the start, how much would you have today?
 # It reveals drawdown periods, regime changes, and potential post-publication decay.
@@ -1082,7 +1085,7 @@ Following Fama and MacBeth [-@FamaMacBeth1973], we run monthly cross-sectional r
 ```{r fama-macbeth}
 #| label: fama-macbeth
 
-# ── Fama-MacBeth Cross-Sectional Regressions ──
+# -- Fama-MacBeth Cross-Sectional Regressions --
 # Portfolio sorts (Section 3) test whether the signal predicts returns
 # across GROUPS of stocks. Fama-MacBeth tests whether the signal predicts
 # returns at the INDIVIDUAL STOCK level, providing a complementary perspective.
@@ -1098,7 +1101,7 @@ Following Fama and MacBeth [-@FamaMacBeth1973], we run monthly cross-sectional r
 # assignment's voluntary Section 2.2.6, which specifies using signal
 # CHARACTERISTICS (not factor betas) as the regressor.
 
-# ── Prepare the data ──
+# -- Prepare the data --
 # The signal in crsp_monthly_signal is already lagged — it reflects
 # information available before the return measurement period.
 # So we regress ret_excess directly on signal (no manual lead/lag needed).
@@ -1106,7 +1109,7 @@ Following Fama and MacBeth [-@FamaMacBeth1973], we run monthly cross-sectional r
 fm_data <- crsp_signal |>
   drop_na(ret_excess, signal)
 
-# ── Step 1: Monthly cross-sectional regressions ──
+# -- Step 1: Monthly cross-sectional regressions --
 # group_by(month): splits the data into monthly cross-sections.
 # do(tidy(lm(...))): runs an OLS regression within each month and
 #   converts the output to a tidy tibble (one row per coefficient).
@@ -1121,7 +1124,7 @@ fm_coefs <- fm_data |>
 # associated with the signal in that month's cross-section.
 gamma1_ts <- fm_coefs |> filter(term == "signal")
 
-# ── Step 2: Time-series average with Newey-West standard errors ──
+# -- Step 2: Time-series average with Newey-West standard errors --
 # The monthly gamma_1 estimates may be autocorrelated (e.g., if the
 # signal premium is persistent across months). Plain standard errors
 # (sd/sqrt(n)) would understate uncertainty. Newey-West with lag=3
@@ -1134,7 +1137,7 @@ fm_stat <- function(x, lag = 3) {
 
 g1 <- fm_stat(gamma1_ts$estimate)
 
-# ── Present results ──
+# -- Present results --
 tibble(
   `γ₁ (% p.m.)` = g1["mean"] * 100,     # Average cross-sectional premium in %
   `NW SE (%)` = g1["se"] * 100,          # Newey-West standard error in %
@@ -1156,7 +1159,7 @@ The tight Newey-West standard error (0.028%) and high t-stat (7.35 vs. 5.92 from
 ```{r fm-with-size}
 #| label: fm-with-size
 
-# ── Extended Fama-MacBeth: add log(size) as a control variable ──
+# -- Extended Fama-MacBeth: add log(size) as a control variable --
 # The univariate regression showed a significant signal premium, but
 # we know the anomaly is stronger among small stocks (EW >> VW in
 # the portfolio sorts). A natural concern: is gamma_1 simply picking
@@ -1170,7 +1173,7 @@ The tight Newey-West standard error (0.028%) and high t-stat (7.35 vs. 5.92 from
 # If gamma_1 remains significant after controlling for size, the
 # signal premium is not merely a disguised small-cap effect.
 
-# ── Prepare data with size control ──
+# -- Prepare data with size control --
 fm_data_ext <- fm_data |>
   # log(mktcap_lag): natural log of last month's market cap.
   # We use the log because the size distribution is extremely right-skewed
@@ -1179,13 +1182,13 @@ fm_data_ext <- fm_data |>
   mutate(log_size = log(mktcap_lag)) |>
   drop_na(log_size)  # Remove any stocks with missing market cap
 
-# ── Monthly cross-sectional regressions with both regressors ──
+# -- Monthly cross-sectional regressions with both regressors --
 fm_coefs_ext <- fm_data_ext |>
   group_by(month) |>
   do(tidy(lm(ret_excess ~ signal + log_size, data = .))) |>
   ungroup()
 
-# ── Extract time-series of coefficients for each variable ──
+# -- Extract time-series of coefficients for each variable --
 # gamma_1 (signal): the premium per unit of recommendation change,
 #   AFTER controlling for firm size within each monthly cross-section.
 g1x <- fm_stat(fm_coefs_ext |> filter(term == "signal") |> pull(estimate))
@@ -1195,7 +1198,7 @@ g1x <- fm_stat(fm_coefs_ext |> filter(term == "signal") |> pull(estimate))
 #   means smaller firms earn higher returns (the classic size effect).
 gs  <- fm_stat(fm_coefs_ext |> filter(term == "log_size") |> pull(estimate))
 
-# ── Present both coefficients side by side ──
+# -- Present both coefficients side by side --
 tibble(
   Variable = c("Signal (γ₁)", "Log size"),
   `Mean (% p.m.)` = c(g1x["mean"], gs["mean"]) * 100,
@@ -1216,7 +1219,7 @@ The fact that γ₁ slightly *increases* when adding the size control is worth n
 ```{r gamma-dynamics}
 #| label: gamma-dynamics
 
-# ── Plot the time-varying Fama-MacBeth premium ──
+# -- Plot the time-varying Fama-MacBeth premium --
 # The full-sample gamma_1 is a single number (0.21%), but the signal
 # premium almost certainly varies over time. This plot shows WHEN the
 # signal earns higher or lower premiums, and whether there is visible
