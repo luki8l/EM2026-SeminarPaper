@@ -94,6 +94,17 @@ crsp_signal <- tbl(tidy_finance, "crsp_monthly_signal") |>
   ) |>
   collect() |>
   rename(signal = all_of(SIGNAL_COL)) |>
+  # ── Timing fix: lag signal by one month ──────────────────────────────────
+  # In crsp_monthly_signal, signal at month t is computed using data through
+  # the END of month t (C&Z convention: "data at end of t can be used to trade
+  # at end of t"). In CRSP, ret_excess at month t is the return DURING month t
+  # (end of t-1 → end of t). To avoid look-ahead bias, we must use signal(t-1)
+  # to predict ret_excess(t), i.e. lag the signal by one month.
+  # This is consistent with the Fama-MacBeth section which uses lead(ret_excess).
+  arrange(permno, month) |>
+  group_by(permno) |>
+  mutate(signal = lag(signal)) |>
+  ungroup() |>
   drop_na(signal, ret_excess, mktcap, mktcap_lag) |>
   filter(mktcap_lag > 0)
 
@@ -134,6 +145,16 @@ coverage <- crsp_signal |>
     pct_zero = mean(abs(signal) < 1e-8),
     .groups = "drop"
   )
+
+# ── Diagnostic: warn if no-change stocks are missing ─────────────────────
+# JKKL explicitly place all "no-change" (signal = 0) stocks in the middle
+# quintile, producing ~30% of the sample there. If pct_zero is near 0,
+# the database stores NA instead of 0 for no-change stocks, and our drop_na
+# has removed them — causing inflated extreme-quintile returns.
+cat(sprintf(
+  "Mean fraction of zero-signal obs: %.1f%%\n(Expected ~25-35%% for JKKL-style signal; near 0%% → NA-for-no-change issue)\n",
+  mean(coverage$pct_zero) * 100
+))
 
 ggplot(coverage, aes(x = month, y = n_firms)) +
   geom_line(color = "steelblue") +
@@ -345,7 +366,9 @@ port_q5 |>
 
 ### Discussion of Replication Quality
 
-Any deviation from C&Z's Table 2 may stem from several sources. First, the `tidy_finance` database may cover a slightly different sample window than C&Z's full WRDS extract. Second, C&Z typically winsorize signals at the 1st/99th percentiles before sorting; the pre-computed signal in the database may apply different or no winsorization. Third, the discrete nature of recommendation changes means that small differences in breakpoint computation --- such as how tied values at zero are allocated --- can shift the composition of extreme portfolios. Fourth, post-publication decay [@McLeanPontiff2016] may weaken the anomaly in the later portion of the sample.
+**Timing convention.** The single most important methodological choice is the lag structure. In the `crsp_monthly_signal` database, the C&Z signals are computed using data through the end of month $t$ and stored at month $t$. CRSP's `ret_excess` for month $t$ covers the period *from* end of $t-1$ *to* end of $t$. Using `signal(t)` to predict `ret_excess(t)` would create look-ahead bias (analyst upgrades correlate contemporaneously with high returns because the market reacts to the news). We therefore lag the signal by one month before sorting, so that `signal(t-1)` — known before month $t$ begins — predicts `ret_excess(t)`. This aligns with JKKL's design, where portfolios are formed at quarter-end $t$ and hold positions starting in quarter $t+1$.
+
+Any remaining deviation from C&Z's Table 2 may stem from several sources. First, the `tidy_finance` database may cover a slightly different sample window than C&Z's full WRDS extract. Second, C&Z typically winsorize signals at the 1st/99th percentiles before sorting; the pre-computed signal in the database may apply different or no winsorization. Third, the discrete nature of recommendation changes means that small differences in breakpoint computation --- such as how tied values at zero are allocated --- can shift the composition of extreme portfolios. Fourth, post-publication decay [@McLeanPontiff2016] may weaken the anomaly in the later portion of the sample.
 
 
 # Pricing Tests
@@ -569,15 +592,12 @@ Following Fama and MacBeth [-@FamaMacBeth1973], we run monthly cross-sectional r
 #| label: fama-macbeth
 
 fm_data <- crsp_signal |>
-  arrange(permno, month) |>
-  group_by(permno) |>
-  mutate(ret_lead = lead(ret_excess)) |>
-  ungroup() |>
-  drop_na(ret_lead, signal)
+  # signal is already lagged (see load-data); use ret_excess directly
+  drop_na(ret_excess, signal)
 
 fm_coefs <- fm_data |>
   group_by(month) |>
-  do(tidy(lm(ret_lead ~ signal, data = .))) |>
+  do(tidy(lm(ret_excess ~ signal, data = .))) |>
   ungroup()
 
 gamma1_ts <- fm_coefs |> filter(term == "signal")
@@ -610,7 +630,7 @@ fm_data_ext <- fm_data |>
 
 fm_coefs_ext <- fm_data_ext |>
   group_by(month) |>
-  do(tidy(lm(ret_lead ~ signal + log_size, data = .))) |>
+  do(tidy(lm(ret_excess ~ signal + log_size, data = .))) |>
   ungroup()
 
 g1x <- fm_stat(fm_coefs_ext |> filter(term == "signal") |> pull(estimate))
